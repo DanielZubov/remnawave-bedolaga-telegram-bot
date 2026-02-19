@@ -6,22 +6,12 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-remnawave_bot}
       POSTGRES_USER: ${POSTGRES_USER:-remnawave_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secure_password_123}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-6e3489066ede55a96e9835429190c5d3}
       POSTGRES_INITDB_ARGS: '--encoding=UTF8 --locale=C'
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
-      - bot_network
-    healthcheck:
-      test:
-        [
-          'CMD-SHELL',
-          'pg_isready -U ${POSTGRES_USER:-remnawave_user} -d ${POSTGRES_DB:-remnawave_bot}',
-        ]
-      interval: 30s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
+      - bot_network # Внутренняя сеть для связи с ботом
 
   redis:
     image: redis:7-alpine
@@ -32,77 +22,52 @@ services:
       - redis_data:/data
     networks:
       - bot_network
-    healthcheck:
-      test: ['CMD', 'redis-cli', 'ping']
-      interval: 30s
-      timeout: 10s
-      retries: 3
 
   bot:
-    build: .
+    image: ghcr.io/bedolaga-dev/remnawave-bedolaga-telegram-bot:latest # Используем готовый образ
     container_name: remnawave_bot
     restart: unless-stopped
     depends_on:
       postgres:
-        condition: service_healthy
+        condition: service_started
       redis:
-        condition: service_healthy
+        condition: service_started
     env_file:
       - .env
-    environment:
-      FORCE_COLOR: '1'
-      DOCKER_ENV: 'true'
-      DATABASE_MODE: 'auto'
-      POSTGRES_HOST: 'postgres'
-      POSTGRES_PORT: '5432'
-      POSTGRES_DB: '${POSTGRES_DB:-remnawave_bot}'
-      POSTGRES_USER: '${POSTGRES_USER:-remnawave_user}'
-      POSTGRES_PASSWORD: '${POSTGRES_PASSWORD:-secure_password_123}'
-
-      REDIS_URL: 'redis://redis:6379/0'
-
-      TZ: 'Europe/Moscow'
-      LOCALES_PATH: '${LOCALES_PATH:-/app/locales}'
+    networks:
+      - bot_network # Для связи с БД и Redis
+      - srv_proxy   # Для связи с Traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=srv_proxy"
+      # Используем путь вебхука из твоего .env
+      - "traefik.http.routers.remnabot.rule=Host(`remnabot.hikamo.ru`) && (PathPrefix(`/webhook`) || PathPrefix(`/yookassa-webhook`) || PathPrefix(`/8527734458:AAEjUN-uSCtEmF0Vipqr0u_jEEV2bm3lMVQ`))"
+      - "traefik.http.routers.remnabot.entrypoints=https"
+      - "traefik.http.routers.remnabot.tls=true"
+      - "traefik.http.routers.remnabot.tls.certresolver=cloudflare"
+      - "traefik.http.services.remnabot.loadbalancer.server.port=8081" # Порт из твоего .env
+      - "traefik.http.routers.remnabot.middlewares=hsts-header,compress"
+      - "traefik.http.middlewares.hsts-header.headers.stsSeconds=15552000"
+      - "traefik.http.middlewares.compress.compress=true"
     volumes:
-      # Логи
       - ./logs:/app/logs:rw
-      # Данные приложения (для SQLite в случае переключения)
-      - ./data:/app/data:rw
       - ./locales:/app/locales:rw
-      # Конфигурация приложения
-      # - ./app-config.json:/app/app-config.json:ro
-      # Timezone
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
-      # Логотип для сообщений
       - ./vpn_logo.png:/app/vpn_logo.png:ro
-    ports:
-      - '${WEB_API_PORT:-8080}:8080'
-    networks:
-      - bot_network
     healthcheck:
-      test:
-        [
-          'CMD-SHELL',
-          'python -c "import requests, os; requests.get(''http://localhost:8080/health'', headers={''X-API-Key'': os.environ.get(''WEB_API_DEFAULT_TOKEN'')}, timeout=5) or exit(1)"',
-        ]
+      # Проверка порта 8081 (как в .env)
+      test: ["CMD-SHELL", "python -c 'import requests; requests.get(\"http://localhost:8081/health\", timeout=5)' || exit 1"]
       interval: 60s
       timeout: 10s
       retries: 3
-      start_period: 30s
 
 volumes:
   postgres_data:
-    driver: local
   redis_data:
-    driver: local
 
 networks:
-  bot_network:
+  bot_network: # Внутренняя сеть
     driver: bridge
-    ipam:
-      config:
-        - subnet: 172.20.0.0/16
-          gateway: 172.20.0.1
-    driver_opts:
-      com.docker.network.driver.mtu: 1350
+  srv_proxy: # Твоя сеть с Traefik
+    external: true
